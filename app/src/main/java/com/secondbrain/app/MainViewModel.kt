@@ -6,8 +6,10 @@ import androidx.lifecycle.viewModelScope
 import com.secondbrain.app.core.model.Memory
 import com.secondbrain.app.domain.capture.SaveTextCaptureUseCase
 import com.secondbrain.app.domain.memory.MemoryRepository
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -23,27 +25,25 @@ class MainViewModel(
             initialValue = emptyList()
         )
 
-    var captureText: String = ""
-        private set
+    private val _captureText = MutableStateFlow("")
+    val captureText: StateFlow<String> = _captureText.asStateFlow()
 
-    var isSaving: Boolean = false
-        private set
+    private val _isSaving = MutableStateFlow(false)
+    val isSaving: StateFlow<Boolean> = _isSaving.asStateFlow()
 
     fun updateCaptureText(value: String) {
-        captureText = value
+        _captureText.value = value
     }
 
-    fun saveCapture(onStateChanged: () -> Unit) {
-        val text = captureText.trim()
-        if (text.isEmpty() || isSaving) return
+    fun saveCapture() {
+        val text = _captureText.value.trim()
+        if (text.isEmpty() || _isSaving.value) return
 
-        isSaving = true
-        onStateChanged()
+        _isSaving.value = true
         viewModelScope.launch {
             runCatching { saveTextCapture(text) }
-                .onSuccess { captureText = "" }
-            isSaving = false
-            onStateChanged()
+                .onSuccess { _captureText.value = "" }
+            _isSaving.value = false
         }
     }
 
