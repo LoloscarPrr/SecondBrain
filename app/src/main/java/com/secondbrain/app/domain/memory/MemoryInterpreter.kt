@@ -6,6 +6,7 @@ import com.secondbrain.app.core.model.TemporalContext
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.Month
+import java.time.YearMonth
 import java.time.temporal.TemporalAdjusters
 
 /**
@@ -64,11 +65,7 @@ class MemoryInterpreter {
             else -> null
         }
         if (relative != null) {
-            return TemporalContext(
-                startDate = relative.first,
-                dayPart = dayPart,
-                sourceExpression = relative.second + dayPartSuffix(dayPart)
-            )
+            return TemporalContext(relative.first, dayPart = dayPart, sourceExpression = relative.second + dayPartSuffix(dayPart))
         }
 
         val rangeRegex = Regex("\\b(\\d{1,2})\\s+y\\s+(\\d{1,2})\\s+de\\s+([a-záéíóúñ]+)(?:\\s+de\\s+(\\d{4}))?\\b")
@@ -109,6 +106,28 @@ class MemoryInterpreter {
             return TemporalContext(date, dayPart = dayPart, sourceExpression = weekday.second + dayPartSuffix(dayPart))
         }
 
+        // Conversational shorthand: "el 28", "para el 28", "este 28", "el próximo 5".
+        // Requiring a date cue prevents arbitrary numbers (prices, IDs, plates) from becoming dates.
+        val shortDayRegex = Regex("\\b((?:para\\s+)?el|este|pr[oó]ximo)\\s+(\\d{1,2})\\b")
+        shortDayRegex.find(text)?.let { match ->
+            val day = match.groupValues[2].toIntOrNull() ?: return@let
+            if (day !in 1..31) return@let
+            val date = resolveNextDayOfMonth(day, today) ?: return@let
+            return TemporalContext(date, dayPart = dayPart, sourceExpression = match.value + dayPartSuffix(dayPart))
+        }
+
+        return null
+    }
+
+    private fun resolveNextDayOfMonth(day: Int, today: LocalDate): LocalDate? {
+        var month = YearMonth.from(today)
+        repeat(13) {
+            if (day <= month.lengthOfMonth()) {
+                val candidate = month.atDay(day)
+                if (!candidate.isBefore(today)) return candidate
+            }
+            month = month.plusMonths(1)
+        }
         return null
     }
 
@@ -128,42 +147,26 @@ class MemoryInterpreter {
 
     private fun weekdayFromSpanish(text: String): Pair<DayOfWeek, String>? {
         val days = listOf(
-            Triple("lunes", DayOfWeek.MONDAY, "lunes"),
-            Triple("martes", DayOfWeek.TUESDAY, "martes"),
-            Triple("miércoles", DayOfWeek.WEDNESDAY, "miércoles"),
-            Triple("miercoles", DayOfWeek.WEDNESDAY, "miercoles"),
-            Triple("jueves", DayOfWeek.THURSDAY, "jueves"),
-            Triple("viernes", DayOfWeek.FRIDAY, "viernes"),
-            Triple("sábado", DayOfWeek.SATURDAY, "sábado"),
-            Triple("sabado", DayOfWeek.SATURDAY, "sabado"),
+            Triple("lunes", DayOfWeek.MONDAY, "lunes"), Triple("martes", DayOfWeek.TUESDAY, "martes"),
+            Triple("miércoles", DayOfWeek.WEDNESDAY, "miércoles"), Triple("miercoles", DayOfWeek.WEDNESDAY, "miercoles"),
+            Triple("jueves", DayOfWeek.THURSDAY, "jueves"), Triple("viernes", DayOfWeek.FRIDAY, "viernes"),
+            Triple("sábado", DayOfWeek.SATURDAY, "sábado"), Triple("sabado", DayOfWeek.SATURDAY, "sabado"),
             Triple("domingo", DayOfWeek.SUNDAY, "domingo")
         )
-        return days.firstOrNull { Regex("\\b${it.first}\\b").containsMatchIn(text) }
-            ?.let { it.second to it.third }
+        return days.firstOrNull { Regex("\\b${it.first}\\b").containsMatchIn(text) }?.let { it.second to it.third }
     }
 
     private fun monthFromSpanish(value: String): Month? = when (value) {
-        "enero" -> Month.JANUARY
-        "febrero" -> Month.FEBRUARY
-        "marzo" -> Month.MARCH
-        "abril" -> Month.APRIL
-        "mayo" -> Month.MAY
-        "junio" -> Month.JUNE
-        "julio" -> Month.JULY
-        "agosto" -> Month.AUGUST
-        "septiembre", "setiembre" -> Month.SEPTEMBER
-        "octubre" -> Month.OCTOBER
-        "noviembre" -> Month.NOVEMBER
-        "diciembre" -> Month.DECEMBER
+        "enero" -> Month.JANUARY; "febrero" -> Month.FEBRUARY; "marzo" -> Month.MARCH
+        "abril" -> Month.APRIL; "mayo" -> Month.MAY; "junio" -> Month.JUNE
+        "julio" -> Month.JULY; "agosto" -> Month.AUGUST; "septiembre", "setiembre" -> Month.SEPTEMBER
+        "octubre" -> Month.OCTOBER; "noviembre" -> Month.NOVEMBER; "diciembre" -> Month.DECEMBER
         else -> null
     }
 
     private fun dayPartSuffix(dayPart: DayPart?): String = when (dayPart) {
-        DayPart.MORNING -> " · mañana"
-        DayPart.AFTERNOON -> " · tarde"
-        DayPart.EVENING -> " · tarde-noche"
-        DayPart.NIGHT -> " · noche"
-        null -> ""
+        DayPart.MORNING -> " · mañana"; DayPart.AFTERNOON -> " · tarde"
+        DayPart.EVENING -> " · tarde-noche"; DayPart.NIGHT -> " · noche"; null -> ""
     }
 
     private fun buildSummary(text: String, type: MemoryType): String? {
