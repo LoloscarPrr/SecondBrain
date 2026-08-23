@@ -34,7 +34,8 @@ class SaveTextCaptureUseCase(
             type = interpretation.type,
             importance = interpretation.importance,
             confidence = interpretation.confidence,
-            sourceId = capture.id
+            sourceId = capture.id,
+            temporalContext = interpretation.temporalContext
         )
         memoryRepository.saveMemory(memory)
 
