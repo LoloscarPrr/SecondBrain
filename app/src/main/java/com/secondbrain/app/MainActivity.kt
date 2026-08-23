@@ -25,9 +25,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.secondbrain.app.core.model.DayPart
 import com.secondbrain.app.core.model.Memory
+import com.secondbrain.app.core.model.TemporalContext
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels {
@@ -142,7 +145,7 @@ private fun SecondBrainApp(viewModel: MainViewModel) {
 
 @Composable
 private fun MemoryCard(memory: Memory) {
-    val formatter = DateTimeFormatter.ofPattern("dd MMM yyyy · HH:mm")
+    val createdFormatter = DateTimeFormatter.ofPattern("dd MMM yyyy · HH:mm", Locale("es", "CL"))
         .withZone(ZoneId.systemDefault())
 
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -160,14 +163,40 @@ private fun MemoryCard(memory: Memory) {
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = formatter.format(memory.createdAt),
+                    text = createdFormatter.format(memory.createdAt),
                     style = MaterialTheme.typography.labelMedium
                 )
             }
+
+            memory.temporalContext?.let { temporal ->
+                Text(
+                    text = temporal.displayLabel(),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
             Text(
                 text = memory.content,
                 style = MaterialTheme.typography.bodyLarge
             )
         }
     }
+}
+
+private fun TemporalContext.displayLabel(): String {
+    val dateFormatter = DateTimeFormatter.ofPattern("dd MMM yyyy", Locale("es", "CL"))
+    val dateText = if (endDate != null && endDate != startDate) {
+        "${dateFormatter.format(startDate)} → ${dateFormatter.format(endDate)}"
+    } else {
+        dateFormatter.format(startDate)
+    }
+    val partText = when (dayPart) {
+        DayPart.MORNING -> " · mañana"
+        DayPart.AFTERNOON -> " · tarde"
+        DayPart.EVENING -> " · tarde-noche"
+        DayPart.NIGHT -> " · noche"
+        null -> ""
+    }
+    return "Programado: $dateText$partText"
 }
