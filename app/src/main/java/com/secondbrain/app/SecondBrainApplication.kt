@@ -4,6 +4,7 @@ import android.app.Application
 import com.secondbrain.app.data.local.SecondBrainDatabase
 import com.secondbrain.app.data.repository.LocalCaptureRepository
 import com.secondbrain.app.data.repository.LocalMemoryRepository
+import com.secondbrain.app.domain.capture.SaveImageCaptureUseCase
 import com.secondbrain.app.domain.capture.SaveTextCaptureUseCase
 import com.secondbrain.app.domain.memory.MemoryRepository
 
@@ -19,7 +20,12 @@ class SecondBrainApplication : Application() {
     }
 
     val saveTextCapture by lazy {
-        SaveTextCaptureUseCase(
+        SaveTextCaptureUseCase(captureRepository = captureRepository, memoryRepository = memoryRepository)
+    }
+
+    val saveImageCapture by lazy {
+        SaveImageCaptureUseCase(
+            context = this,
             captureRepository = captureRepository,
             memoryRepository = memoryRepository
         )
