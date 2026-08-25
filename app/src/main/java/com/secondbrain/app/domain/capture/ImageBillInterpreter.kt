@@ -3,48 +3,82 @@ package com.secondbrain.app.domain.capture
 import java.time.LocalDate
 import java.time.YearMonth
 
-/** Extracts common Chilean bill line-items from OCR text without sending the image to cloud AI. */
+/** Extracts common Chilean bill line-items using OCR text plus visual coordinates. */
 class ImageBillInterpreter {
     data class BillItem(val label: String, val amount: Int, val dueDate: LocalDate?)
 
-    fun extract(text: String, today: LocalDate = LocalDate.now()): List<BillItem> {
-        val lines = text.lines().map { it.trim() }.filter { it.isNotBlank() }
-        val dueDates = Regex("(?i)(?:pagar\\s+hasta\\s*)?(\\d{1,2})/(\\d{1,2})")
-            .findAll(text)
-            .mapNotNull { m -> resolveDate(m.groupValues[1].toInt(), m.groupValues[2].toInt(), today) }
-            .toList()
-        val defaultDue = dueDates.firstOrNull()
+    private val amountRegex = Regex("\\$\\s*([0-9]{1,3}(?:[.]?[0-9]{3})+|[0-9]+)")
+    private val dateRegex = Regex("(?i)(?:pagar\\s+hasta\\s*)?(\\d{1,2})/(\\d{1,2})")
 
-        val amountRegex = Regex("\\$\\s*([0-9]{1,3}(?:[.]?[0-9]{3})+|[0-9]+)")
-        val amounts = lines.mapNotNull { line ->
-            amountRegex.find(line)?.groupValues?.get(1)?.replace(".", "")?.toIntOrNull()?.let { line to it }
+    fun extract(lines: List<OcrTextLine>, today: LocalDate = LocalDate.now()): List<BillItem> {
+        if (lines.isEmpty()) return emptyList()
+
+        val ordered = lines.sortedWith(compareBy<OcrTextLine> { it.top }.thenBy { it.left })
+        val totalLine = ordered.firstOrNull { it.text.contains("total a pagar", ignoreCase = true) }
+        val totalAmountLine = totalLine?.let { total ->
+            ordered.firstOrNull { it.top >= total.top && amountRegex.containsMatchIn(it.text) }
         }
+        val totalAmount = totalAmountLine?.let { parseAmount(it.text) }
 
-        fun findAmountNear(vararg terms: String): Int? {
-            val index = lines.indexOfFirst { line -> terms.any { line.contains(it, ignoreCase = true) } }
-            if (index < 0) return null
-            for (i in index downTo maxOf(0, index - 2)) amountRegex.find(lines[i])?.let { return it.groupValues[1].replace(".", "").toIntOrNull() }
-            for (i in index..minOf(lines.lastIndex, index + 2)) amountRegex.find(lines[i])?.let { return it.groupValues[1].replace(".", "").toIntOrNull() }
-            return null
-        }
+        val upperBoundaryY = ordered
+            .filter { line ->
+                line.text.contains("revisar detalle", ignoreCase = true) ||
+                    line.text.equals("pagar", ignoreCase = true) ||
+                    line.text.contains("tus boletas", ignoreCase = true)
+            }
+            .map { it.top }
+            .minOrNull()
+            ?: Int.MAX_VALUE
 
-        val mobile = findAmountNear("móvil", "movil")
-        val home = findAmountNear("hogar")
-        if (mobile != null || home != null) {
-            return buildList {
-                mobile?.let { add(BillItem("plan móvil", it, defaultDue)) }
-                home?.let { add(BillItem("hogar", it, dueDates.getOrNull(1) ?: defaultDue)) }
+        val startY = totalLine?.top ?: 0
+        val candidateLines = ordered.filter { it.top >= startY && it.bottom < upperBoundaryY }
+
+        val amountCandidates = candidateLines
+            .mapNotNull { line -> parseAmount(line.text)?.let { amount -> line to amount } }
+            .filter { (_, amount) -> amount != totalAmount }
+            .distinctBy { it.second }
+            .sortedBy { it.first.centerY }
+
+        val dueDates = candidateLines
+            .mapNotNull { line ->
+                dateRegex.find(line.text)?.let { match ->
+                    resolveDate(match.groupValues[1].toInt(), match.groupValues[2].toInt(), today)
+                }
+            }
+
+        // For the Entel-style bill layout, the two detail amounts appear vertically in the
+        // same order as the service icons: mobile first, home second. Restricting this to the
+        // upper bill region prevents lower-page amounts such as monthly variation from leaking in.
+        if (amountCandidates.size >= 2) {
+            val mobile = amountCandidates[0].second
+            val home = amountCandidates[1].second
+            val mobileDue = dueDates.getOrNull(0) ?: dueDates.firstOrNull()
+            val homeDue = dueDates.getOrNull(1) ?: dueDates.firstOrNull()
+
+            if (totalAmount == null || mobile + home == totalAmount) {
+                return listOf(
+                    BillItem("plan móvil", mobile, mobileDue),
+                    BillItem("hogar", home, homeDue)
+                )
             }
         }
 
-        // Fallback for layouts where OCR loses the icons/labels but preserves the two detail amounts.
-        val total = Regex("(?i)total\\s+a\\s+pagar[\\s:]*\\$?\\s*([0-9.]+)").find(text)
-            ?.groupValues?.get(1)?.replace(".", "")?.toIntOrNull()
-        val detail = amounts.map { it.second }.filter { it != total }.distinct()
-        return if (detail.size == 2 && total != null && detail.sum() == total) {
-            listOf(BillItem("cuenta 1", detail[0], defaultDue), BillItem("cuenta 2", detail[1], dueDates.getOrNull(1) ?: defaultDue))
-        } else emptyList()
+        return emptyList()
     }
+
+    fun extract(text: String, today: LocalDate = LocalDate.now()): List<BillItem> {
+        val synthetic = text.lines()
+            .mapIndexedNotNull { index, raw ->
+                val line = raw.trim()
+                if (line.isBlank()) null else OcrTextLine(line, 0, index * 20, 1000, index * 20 + 18)
+            }
+        return extract(synthetic, today)
+    }
+
+    private fun parseAmount(text: String): Int? = amountRegex.find(text)
+        ?.groupValues?.get(1)
+        ?.replace(".", "")
+        ?.toIntOrNull()
 
     private fun resolveDate(day: Int, month: Int, today: LocalDate): LocalDate? {
         var ym = runCatching { YearMonth.of(today.year, month) }.getOrNull() ?: return null
