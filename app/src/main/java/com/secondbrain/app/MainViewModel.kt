@@ -53,7 +53,13 @@ class MainViewModel(
         _statusMessage.value = "Analizando imagen…"
         viewModelScope.launch {
             runCatching { saveImageCapture(uri) }
-                .onSuccess { _statusMessage.value = "Imagen analizada y memorias creadas." }
+                .onSuccess { count ->
+                    _statusMessage.value = if (count == 1) {
+                        "Imagen analizada: 1 memoria creada."
+                    } else {
+                        "Imagen analizada: $count memorias creadas."
+                    }
+                }
                 .onFailure { _statusMessage.value = "No pude analizar esa imagen." }
             _isSaving.value = false
         }
