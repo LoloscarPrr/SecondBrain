@@ -22,7 +22,7 @@ class SaveImageCaptureUseCase(
     private val memoryRepository: MemoryRepository,
     private val billInterpreter: ImageBillInterpreter = ImageBillInterpreter()
 ) {
-    suspend operator fun invoke(uri: Uri) {
+    suspend operator fun invoke(uri: Uri): Int {
         val capture = RawCapture(
             type = CaptureType.IMAGE,
             uri = uri.toString(),
@@ -42,7 +42,22 @@ class SaveImageCaptureUseCase(
             recognizer.close()
 
             val ocrText = result.text.trim()
-            val items = billInterpreter.extract(ocrText)
+            val spatialLines = result.textBlocks.flatMap { block ->
+                block.lines.mapNotNull { line ->
+                    line.boundingBox?.let { box ->
+                        OcrTextLine(
+                            text = line.text,
+                            left = box.left,
+                            top = box.top,
+                            right = box.right,
+                            bottom = box.bottom
+                        )
+                    }
+                }
+            }
+
+            val items = billInterpreter.extract(spatialLines)
+            var created = 0
             if (items.isNotEmpty()) {
                 items.forEach { item ->
                     val amount = "$" + "%,d".format(item.amount).replace(',', '.')
@@ -51,11 +66,17 @@ class SaveImageCaptureUseCase(
                             content = "Pagar ${item.label}: $amount",
                             type = MemoryType.TASK,
                             importance = 0.85f,
-                            confidence = 0.86f,
+                            confidence = 0.92f,
                             sourceId = capture.id,
-                            temporalContext = item.dueDate?.let { TemporalContext(startDate = it, sourceExpression = "vencimiento detectado en imagen") }
+                            temporalContext = item.dueDate?.let {
+                                TemporalContext(
+                                    startDate = it,
+                                    sourceExpression = "vencimiento detectado en imagen"
+                                )
+                            }
                         )
                     )
+                    created++
                 }
             } else {
                 memoryRepository.saveMemory(
@@ -68,8 +89,17 @@ class SaveImageCaptureUseCase(
                         sourceId = capture.id
                     )
                 )
+                created = 1
             }
-            captureRepository.saveCapture(capture.copy(rawText = ocrText, processedAt = java.time.Instant.now(), processingState = ProcessingState.PROCESSED))
+
+            captureRepository.saveCapture(
+                capture.copy(
+                    rawText = ocrText,
+                    processedAt = java.time.Instant.now(),
+                    processingState = ProcessingState.PROCESSED
+                )
+            )
+            return created
         } catch (error: Throwable) {
             captureRepository.saveCapture(capture.copy(processingState = ProcessingState.FAILED))
             throw error
