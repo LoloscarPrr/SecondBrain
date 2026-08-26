@@ -9,12 +9,8 @@ import java.time.Month
 import java.time.YearMonth
 import java.time.temporal.TemporalAdjusters
 
-/**
- * Lightweight local interpreter used before the AI reasoning layer.
- * It classifies memories and extracts common Spanish temporal expressions.
- */
+/** Local interpreter used before the AI reasoning layer. */
 class MemoryInterpreter {
-
     data class Interpretation(
         val type: MemoryType,
         val summary: String?,
@@ -26,78 +22,86 @@ class MemoryInterpreter {
     fun interpret(text: String, today: LocalDate = LocalDate.now()): Interpretation {
         val normalized = text.trim()
         val lower = normalized.lowercase()
-        val temporal = extractTemporalContext(lower, today)
-
-        val type = when {
-            containsAny(lower, "tengo que", "debo ", "necesito ", "hay que", "recordar ", "acuérdame", "acuerdame", "pendiente") -> MemoryType.TASK
-            containsAny(lower, "decidí", "decidi", "decidimos", "queda decidido", "definitivamente", "vamos a hacer") -> MemoryType.DECISION
-            containsAny(lower, "idea:", "se me ocurrió", "se me ocurrio", "podríamos", "podriamos", "quizás podríamos", "quizas podriamos") -> MemoryType.IDEA
-            containsAny(lower, "quiero lograr", "mi objetivo", "meta:") -> MemoryType.GOAL
-            normalized.endsWith("?") || containsAny(lower, "pregunta:", "me pregunto") -> MemoryType.QUESTION
-            containsAny(lower, "prefiero", "me gusta", "no me gusta", "odio ", "me encanta") -> MemoryType.PREFERENCE
-            temporal != null -> MemoryType.EVENT
-            else -> MemoryType.OBSERVATION
-        }
-
+        val typeHint = classify(lower, normalized)
+        val temporal = extractTemporalContext(lower, today, typeHint == MemoryType.TASK)
+        val type = if (typeHint == MemoryType.OBSERVATION && temporal != null) MemoryType.EVENT else typeHint
         val importance = when (type) {
             MemoryType.TASK, MemoryType.DECISION, MemoryType.GOAL -> 0.8f
             MemoryType.EVENT -> 0.75f
             MemoryType.IDEA, MemoryType.QUESTION -> 0.65f
             else -> 0.5f
         }
-
-        return Interpretation(
-            type = type,
-            summary = buildSummary(normalized, type),
-            importance = importance,
-            confidence = if (type == MemoryType.OBSERVATION) 0.55f else 0.82f,
-            temporalContext = temporal
-        )
+        return Interpretation(type, buildSummary(normalized, type), importance,
+            if (type == MemoryType.OBSERVATION) 0.55f else 0.82f, temporal)
     }
 
-    private fun extractTemporalContext(text: String, today: LocalDate): TemporalContext? {
+    private fun classify(text: String, original: String): MemoryType = when {
+        containsAny(text, "tengo que", "debo ", "necesito ", "hay que", "recordar ", "recordarle", "acuérdame", "acuerdame", "pendiente", "pagar ") -> MemoryType.TASK
+        containsAny(text, "decidí", "decidi", "decidimos", "queda decidido", "definitivamente", "vamos a hacer") -> MemoryType.DECISION
+        containsAny(text, "idea:", "se me ocurrió", "se me ocurrio", "podríamos", "podriamos") -> MemoryType.IDEA
+        containsAny(text, "quiero lograr", "mi objetivo", "meta:") -> MemoryType.GOAL
+        original.endsWith("?") || containsAny(text, "pregunta:", "me pregunto") -> MemoryType.QUESTION
+        containsAny(text, "prefiero", "me gusta", "no me gusta", "odio ", "me encanta") -> MemoryType.PREFERENCE
+        else -> MemoryType.OBSERVATION
+    }
+
+    private fun extractTemporalContext(text: String, today: LocalDate, task: Boolean): TemporalContext? {
         val dayPart = extractDayPart(text)
 
+        // For tasks, a leading weekday+day is the action date. This must win over
+        // later dates that merely describe what the task is about.
+        if (task) {
+            val actionDate = Regex("\\b(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\\s+(?:el\\s+)?(\\d{1,2})\\b")
+                .find(text)
+            actionDate?.let { match ->
+                val expectedWeekday = dayOfWeek(match.groupValues[1]) ?: return@let
+                val day = match.groupValues[2].toIntOrNull() ?: return@let
+                val date = resolveNextDayOfMonth(day, today, expectedWeekday) ?: return@let
+                return TemporalContext(date, dayPart = dayPart, sourceExpression = match.value + dayPartSuffix(dayPart))
+            }
+
+            // A date phrase before the task verb is normally the scheduling date.
+            val verbIndex = listOf("debo ", "tengo que", "necesito ", "recordar ", "recordarle", "pagar ")
+                .map { text.indexOf(it) }.filter { it >= 0 }.minOrNull()
+            if (verbIndex != null && verbIndex > 0) {
+                extractSingleTemporal(text.substring(0, verbIndex), today, dayPart)?.let { return it }
+            }
+        }
+
+        return extractSingleTemporal(text, today, dayPart)
+    }
+
+    private fun extractSingleTemporal(text: String, today: LocalDate, dayPart: DayPart?): TemporalContext? {
         val relative = when {
             Regex("\\bpasado mañana\\b").containsMatchIn(text) -> today.plusDays(2) to "pasado mañana"
             Regex("\\bmañana\\b").containsMatchIn(text) -> today.plusDays(1) to "mañana"
             Regex("\\bhoy\\b").containsMatchIn(text) -> today to "hoy"
             else -> null
         }
-        if (relative != null) {
-            return TemporalContext(relative.first, dayPart = dayPart, sourceExpression = relative.second + dayPartSuffix(dayPart))
-        }
+        if (relative != null) return TemporalContext(relative.first, dayPart = dayPart, sourceExpression = relative.second + dayPartSuffix(dayPart))
 
-        val rangeRegex = Regex("\\b(\\d{1,2})\\s+y\\s+(\\d{1,2})\\s+de\\s+([a-záéíóúñ]+)(?:\\s+de\\s+(\\d{4}))?\\b")
-        rangeRegex.find(text)?.let { match ->
-            val firstDay = match.groupValues[1].toInt()
-            val secondDay = match.groupValues[2].toInt()
-            val month = monthFromSpanish(match.groupValues[3]) ?: return@let
-            val explicitYear = match.groupValues[4].toIntOrNull()
-            val start = resolveDate(firstDay, month, explicitYear, today) ?: return@let
-            val endYear = explicitYear ?: start.year
-            val end = runCatching { LocalDate.of(endYear, month, secondDay) }.getOrNull() ?: return@let
-            return TemporalContext(start, end, dayPart, match.value + dayPartSuffix(dayPart))
+        val rangeRegex = Regex("\\b(?:el\\s+)?(\\d{1,2})\\s+y\\s+(?:el\\s+)?(\\d{1,2})\\s+de\\s+([a-záéíóúñ]+)(?:\\s+de\\s+(\\d{4}))?\\b")
+        rangeRegex.find(text)?.let { m ->
+            val month = monthFromSpanish(m.groupValues[3]) ?: return@let
+            val start = resolveDate(m.groupValues[1].toInt(), month, m.groupValues[4].toIntOrNull(), today) ?: return@let
+            val end = runCatching { LocalDate.of(start.year, month, m.groupValues[2].toInt()) }.getOrNull() ?: return@let
+            return TemporalContext(start, end, dayPart, m.value + dayPartSuffix(dayPart))
         }
 
         val explicitRegex = Regex("\\b(\\d{1,2})\\s+de\\s+([a-záéíóúñ]+)(?:\\s+de\\s+(\\d{4}))?\\b")
-        explicitRegex.find(text)?.let { match ->
-            val day = match.groupValues[1].toInt()
-            val month = monthFromSpanish(match.groupValues[2]) ?: return@let
-            val year = match.groupValues[3].toIntOrNull()
-            val date = resolveDate(day, month, year, today) ?: return@let
-            return TemporalContext(date, dayPart = dayPart, sourceExpression = match.value + dayPartSuffix(dayPart))
+        explicitRegex.find(text)?.let { m ->
+            val month = monthFromSpanish(m.groupValues[2]) ?: return@let
+            val date = resolveDate(m.groupValues[1].toInt(), month, m.groupValues[3].toIntOrNull(), today) ?: return@let
+            return TemporalContext(date, dayPart = dayPart, sourceExpression = m.value + dayPartSuffix(dayPart))
         }
 
         val numericRegex = Regex("\\b(\\d{1,2})[/-](\\d{1,2})(?:[/-](\\d{2,4}))?\\b")
-        numericRegex.find(text)?.let { match ->
-            val day = match.groupValues[1].toInt()
-            val monthNumber = match.groupValues[2].toInt()
-            val rawYear = match.groupValues[3].toIntOrNull()
+        numericRegex.find(text)?.let { m ->
+            val month = runCatching { Month.of(m.groupValues[2].toInt()) }.getOrNull() ?: return@let
+            val rawYear = m.groupValues[3].toIntOrNull()
             val year = rawYear?.let { if (it < 100) 2000 + it else it }
-            val month = runCatching { Month.of(monthNumber) }.getOrNull() ?: return@let
-            val date = resolveDate(day, month, year, today) ?: return@let
-            return TemporalContext(date, dayPart = dayPart, sourceExpression = match.value + dayPartSuffix(dayPart))
+            val date = resolveDate(m.groupValues[1].toInt(), month, year, today) ?: return@let
+            return TemporalContext(date, dayPart = dayPart, sourceExpression = m.value + dayPartSuffix(dayPart))
         }
 
         val weekday = weekdayFromSpanish(text)
@@ -106,25 +110,22 @@ class MemoryInterpreter {
             return TemporalContext(date, dayPart = dayPart, sourceExpression = weekday.second + dayPartSuffix(dayPart))
         }
 
-        // Conversational shorthand: "el 28", "para el 28", "este 28", "el próximo 5".
-        // Requiring a date cue prevents arbitrary numbers (prices, IDs, plates) from becoming dates.
         val shortDayRegex = Regex("\\b((?:para\\s+)?el|este|pr[oó]ximo)\\s+(\\d{1,2})\\b")
-        shortDayRegex.find(text)?.let { match ->
-            val day = match.groupValues[2].toIntOrNull() ?: return@let
+        shortDayRegex.find(text)?.let { m ->
+            val day = m.groupValues[2].toIntOrNull() ?: return@let
             if (day !in 1..31) return@let
             val date = resolveNextDayOfMonth(day, today) ?: return@let
-            return TemporalContext(date, dayPart = dayPart, sourceExpression = match.value + dayPartSuffix(dayPart))
+            return TemporalContext(date, dayPart = dayPart, sourceExpression = m.value + dayPartSuffix(dayPart))
         }
-
         return null
     }
 
-    private fun resolveNextDayOfMonth(day: Int, today: LocalDate): LocalDate? {
+    private fun resolveNextDayOfMonth(day: Int, today: LocalDate, expectedWeekday: DayOfWeek? = null): LocalDate? {
         var month = YearMonth.from(today)
-        repeat(13) {
+        repeat(24) {
             if (day <= month.lengthOfMonth()) {
                 val candidate = month.atDay(day)
-                if (!candidate.isBefore(today)) return candidate
+                if (!candidate.isBefore(today) && (expectedWeekday == null || candidate.dayOfWeek == expectedWeekday)) return candidate
             }
             month = month.plusMonths(1)
         }
@@ -137,6 +138,17 @@ class MemoryInterpreter {
         return if (thisYear.isBefore(today)) thisYear.plusYears(1) else thisYear
     }
 
+    private fun dayOfWeek(value: String): DayOfWeek? = when (value.replace('é','e').replace('á','a')) {
+        "lunes" -> DayOfWeek.MONDAY; "martes" -> DayOfWeek.TUESDAY; "miercoles" -> DayOfWeek.WEDNESDAY
+        "jueves" -> DayOfWeek.THURSDAY; "viernes" -> DayOfWeek.FRIDAY; "sabado" -> DayOfWeek.SATURDAY; "domingo" -> DayOfWeek.SUNDAY
+        else -> null
+    }
+
+    private fun weekdayFromSpanish(text: String): Pair<DayOfWeek, String>? {
+        val values = listOf("lunes","martes","miércoles","miercoles","jueves","viernes","sábado","sabado","domingo")
+        return values.firstOrNull { Regex("\\b$it\\b").containsMatchIn(text) }?.let { dayOfWeek(it)!! to it }
+    }
+
     private fun extractDayPart(text: String): DayPart? = when {
         containsAny(text, "temprano", "en la mañana", "por la mañana") -> DayPart.MORNING
         containsAny(text, "en la tarde", "por la tarde") -> DayPart.AFTERNOON
@@ -145,38 +157,22 @@ class MemoryInterpreter {
         else -> null
     }
 
-    private fun weekdayFromSpanish(text: String): Pair<DayOfWeek, String>? {
-        val days = listOf(
-            Triple("lunes", DayOfWeek.MONDAY, "lunes"), Triple("martes", DayOfWeek.TUESDAY, "martes"),
-            Triple("miércoles", DayOfWeek.WEDNESDAY, "miércoles"), Triple("miercoles", DayOfWeek.WEDNESDAY, "miercoles"),
-            Triple("jueves", DayOfWeek.THURSDAY, "jueves"), Triple("viernes", DayOfWeek.FRIDAY, "viernes"),
-            Triple("sábado", DayOfWeek.SATURDAY, "sábado"), Triple("sabado", DayOfWeek.SATURDAY, "sabado"),
-            Triple("domingo", DayOfWeek.SUNDAY, "domingo")
-        )
-        return days.firstOrNull { Regex("\\b${it.first}\\b").containsMatchIn(text) }?.let { it.second to it.third }
-    }
-
-    private fun monthFromSpanish(value: String): Month? = when (value) {
-        "enero" -> Month.JANUARY; "febrero" -> Month.FEBRUARY; "marzo" -> Month.MARCH
-        "abril" -> Month.APRIL; "mayo" -> Month.MAY; "junio" -> Month.JUNE
-        "julio" -> Month.JULY; "agosto" -> Month.AUGUST; "septiembre", "setiembre" -> Month.SEPTEMBER
-        "octubre" -> Month.OCTOBER; "noviembre" -> Month.NOVEMBER; "diciembre" -> Month.DECEMBER
+    private fun monthFromSpanish(v: String): Month? = when (v) {
+        "enero" -> Month.JANUARY; "febrero" -> Month.FEBRUARY; "marzo" -> Month.MARCH; "abril" -> Month.APRIL
+        "mayo" -> Month.MAY; "junio" -> Month.JUNE; "julio" -> Month.JULY; "agosto" -> Month.AUGUST
+        "septiembre", "setiembre" -> Month.SEPTEMBER; "octubre" -> Month.OCTOBER; "noviembre" -> Month.NOVEMBER; "diciembre" -> Month.DECEMBER
         else -> null
     }
 
-    private fun dayPartSuffix(dayPart: DayPart?): String = when (dayPart) {
-        DayPart.MORNING -> " · mañana"; DayPart.AFTERNOON -> " · tarde"
-        DayPart.EVENING -> " · tarde-noche"; DayPart.NIGHT -> " · noche"; null -> ""
+    private fun dayPartSuffix(p: DayPart?): String = when (p) {
+        DayPart.MORNING -> " · mañana"; DayPart.AFTERNOON -> " · tarde"; DayPart.EVENING -> " · tarde-noche"; DayPart.NIGHT -> " · noche"; null -> ""
     }
 
     private fun buildSummary(text: String, type: MemoryType): String? {
         if (text.length <= 72) return null
         val clipped = text.take(96).trimEnd()
-        return "${type.displayName}: $clipped${if (text.length > 96) "…" else ""}"
+        return "${type.name.lowercase().replaceFirstChar { it.uppercase() }}: $clipped${if (text.length > 96) "…" else ""}"
     }
 
-    private fun containsAny(text: String, vararg terms: String): Boolean = terms.any { text.contains(it) }
-
-    private val MemoryType.displayName: String
-        get() = name.lowercase().replaceFirstChar { it.uppercase() }
+    private fun containsAny(text: String, vararg terms: String) = terms.any { text.contains(it) }
 }
