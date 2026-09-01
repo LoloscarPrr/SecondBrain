@@ -4,6 +4,12 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val firebaseConfigPresent = file("google-services.json").exists()
+if (firebaseConfigPresent) {
+    apply(plugin = "com.google.gms.google-services")
+    apply(plugin = "com.google.firebase.crashlytics")
+}
+
 android {
     namespace = "com.secondbrain.app"
     compileSdk = 36
@@ -12,10 +18,11 @@ android {
         applicationId = "com.secondbrain.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.1.0-alpha06"
+        versionCode = 8
+        versionName = "0.1.0-alpha08"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("boolean", "FIREBASE_CONFIGURED", firebaseConfigPresent.toString())
     }
 
     buildTypes {
@@ -66,6 +73,10 @@ dependencies {
 
     implementation("androidx.work:work-runtime-ktx:2.11.0")
     implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    implementation(platform("com.google.firebase:firebase-bom:34.18.0"))
+    implementation("com.google.firebase:firebase-crashlytics")
+    implementation("com.google.firebase:firebase-analytics")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
