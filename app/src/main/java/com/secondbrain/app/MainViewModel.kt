@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.secondbrain.app.core.diagnostics.CrashReporter
 import com.secondbrain.app.core.model.Memory
 import com.secondbrain.app.domain.capture.SaveImageCaptureUseCase
 import com.secondbrain.app.domain.capture.SaveTextCaptureUseCase
@@ -41,8 +42,14 @@ class MainViewModel(
         _isSaving.value = true
         viewModelScope.launch {
             runCatching { saveTextCapture(text) }
-                .onSuccess { _captureText.value = "" }
-                .onFailure { _statusMessage.value = "No pude guardar la memoria." }
+                .onSuccess {
+                    _captureText.value = ""
+                    CrashReporter.log("Text capture saved")
+                }
+                .onFailure { error ->
+                    CrashReporter.record(error, "save_text_capture")
+                    _statusMessage.value = "No pude guardar la memoria."
+                }
             _isSaving.value = false
         }
     }
@@ -54,13 +61,17 @@ class MainViewModel(
         viewModelScope.launch {
             runCatching { saveImageCapture(uri) }
                 .onSuccess { count ->
+                    CrashReporter.log("Image capture processed: $count memories")
                     _statusMessage.value = if (count == 1) {
                         "Imagen analizada: 1 memoria creada."
                     } else {
                         "Imagen analizada: $count memorias creadas."
                     }
                 }
-                .onFailure { _statusMessage.value = "No pude analizar esa imagen." }
+                .onFailure { error ->
+                    CrashReporter.record(error, "save_image_capture")
+                    _statusMessage.value = "No pude analizar esa imagen."
+                }
             _isSaving.value = false
         }
     }
